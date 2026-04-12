@@ -1,0 +1,4 @@
+reolink_isp_tool copy.py
+reolink_isp_tool_backup_before_blank_fields.py.py
+__pycache__/
+*.pyc
