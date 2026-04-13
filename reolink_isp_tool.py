@@ -44,6 +44,7 @@ from tkinter import ttk, messagebox, filedialog
 from datetime import datetime
 
 APP_TITLE = "Reolink ISP Tool"
+APP_VERSION = "1.0.0"
 DEFAULT_SAVE_FILE = "reolink_isp_backup.json"
 
 
@@ -298,7 +299,7 @@ class App(ttk.Frame):
         self._configure_grid()
 
     def _configure_grid(self) -> None:
-        self.master.title(APP_TITLE)
+        self.master.title(f"{APP_TITLE} v{APP_VERSION}")
         self.master.minsize(980, 590)
         self.after(0, self._fit_window_to_content)
         self.master.columnconfigure(0, weight=1)
@@ -1042,7 +1043,7 @@ class App(ttk.Frame):
 
         backup = {
             "tool": APP_TITLE,
-            "version": 1,
+            "version": APP_VERSION,
             "saved_at": datetime.now().isoformat(timespec="seconds"),
             "dev_info": deepcopy(self.current_dev_info) if self.current_dev_info else None,
             "isp": isp,
