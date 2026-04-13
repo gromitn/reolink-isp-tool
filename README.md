@@ -2,6 +2,12 @@
 
 A small Windows desktop app for reading, editing, backing up, and writing Reolink ISP (image) settings.
 
+## Why this exists
+
+Some newer Reolink firmware versions no longer expose certain advanced image / ISP settings as conveniently as older versions did.
+
+This tool was created to make those settings easier to access again in a simple Windows GUI, while still keeping the workflow cautious with backups, verification, and model-aware warnings.
+
 ## What it does
 
 - Reads ISP settings directly from a Reolink camera over your LAN
