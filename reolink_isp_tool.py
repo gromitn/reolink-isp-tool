@@ -44,7 +44,7 @@ from tkinter import ttk, messagebox, filedialog
 from datetime import datetime
 
 APP_TITLE = "Reolink ISP Tool"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.2"
 DEFAULT_SAVE_FILE = "reolink_isp_backup.json"
 
 
@@ -253,6 +253,7 @@ class App(ttk.Frame):
         # Metadata from the most recently loaded backup file, if any.
         self.loaded_backup_dev_info: dict | None = None
         self.loaded_backup_path: str | None = None
+        self.last_set_isp_response: dict | None = None
 
         self.protocol_var = tk.StringVar(value="http")
         self.host_var = tk.StringVar(value="192.168.1.198")
@@ -296,6 +297,12 @@ class App(ttk.Frame):
         self.vcmd = (self.master.register(self._validate_int), "%P")
 
         self._build_ui()
+
+        self.backlight_var.trace_add("write", lambda *_: self._refresh_dependency_states())
+        self.exposure_var.trace_add("write", lambda *_: self._refresh_dependency_states())
+        self.white_balance_var.trace_add("write", lambda *_: self._refresh_dependency_states())
+        self._refresh_dependency_states()
+
         self._configure_grid()
 
     def _configure_grid(self) -> None:
@@ -483,9 +490,10 @@ class App(ttk.Frame):
         for i in range(4):
             numeric.columnconfigure(i, weight=1)
 
-        self._entry(numeric, "Gain Min", self.gain_min_var, 0, 0)
-        self._entry(numeric, "Gain Max", self.gain_max_var, 0, 1)
-        self._entry(
+        self.gain_min_entry = self._entry(numeric, "Gain Min", self.gain_min_var, 0, 0)
+        self.gain_max_entry = self._entry(numeric, "Gain Max", self.gain_max_var, 0, 1)
+
+        self.shutter_min_entry = self._entry(
             numeric,
             "Shutter Min",
             self.shutter_min_var,
@@ -493,7 +501,7 @@ class App(ttk.Frame):
             0,
             tooltip="Minimum shutter value the camera may use. Lower / slower shutter values can brighten the image but may add motion blur. Higher / faster values help freeze movement but need more light.",
         )
-        self._entry(
+        self.shutter_max_entry = self._entry(
             numeric,
             "Shutter Max",
             self.shutter_max_var,
@@ -501,7 +509,8 @@ class App(ttk.Frame):
             1,
             tooltip="Maximum shutter value the camera may use. Keeping the allowed range tighter makes behaviour more predictable. For fast motion or plates, limiting the shutter to faster values can help reduce blur if there is enough light.",
         )
-        self._entry(
+
+        self.blc_entry = self._entry(
             numeric,
             "BLC",
             self.blc_var,
@@ -509,7 +518,7 @@ class App(ttk.Frame):
             0,
             tooltip="Back Light Compensation. Helps brighten darker foreground subjects against a bright background. If highlights or reflective plates start blowing out, try lowering this.",
         )
-        self._entry(
+        self.drc_entry = self._entry(
             numeric,
             "DRC",
             self.drc_var,
@@ -517,8 +526,9 @@ class App(ttk.Frame):
             1,
             tooltip="Dynamic Range Control. Tries to balance very bright and very dark parts of the image. Useful for harsh contrast, but too much can make the image look flatter or less natural.",
         )
-        self._entry(numeric, "Red Gain", self.red_gain_var, 3, 0)
-        self._entry(numeric, "Blue Gain", self.blue_gain_var, 3, 1)
+
+        self.red_gain_entry = self._entry(numeric, "Red Gain", self.red_gain_var, 3, 0)
+        self.blue_gain_entry = self._entry(numeric, "Blue Gain", self.blue_gain_var, 3, 1)
 
         bd_day = ttk.LabelFrame(parent, text="Brightness & Shadows — Day", padding=10)
         bd_day.grid(row=3, column=0, sticky="ew", pady=(10, 0))
@@ -676,12 +686,14 @@ class App(ttk.Frame):
         if tooltip:
             ToolTip(lbl, tooltip)
 
-        ttk.Entry(
+        entry = ttk.Entry(
             parent,
             textvariable=variable,
             validate="key",
             validatecommand=self.vcmd,
-        ).grid(row=row, column=base_col + 1, sticky="ew", padx=(0, 12), pady=(0, 8))
+        )
+        entry.grid(row=row, column=base_col + 1, sticky="ew", padx=(0, 12), pady=(0, 8))
+        return entry
 
     def _client(self) -> ReolinkClient:
         return ReolinkClient(
@@ -789,6 +801,10 @@ class App(ttk.Frame):
     def _compare_requested_vs_verified(self, requested: dict, verified: dict) -> list[str]:
         mismatches: list[str] = []
 
+        requested_backlight = str(requested.get("backLight", "")).strip()
+        requested_exposure = str(requested.get("exposure", "")).strip()
+        requested_white_balance = str(requested.get("whiteBalance", "")).strip()
+
         checks = [
             ("dayNight", "Day/Night"),
             ("dayNightThreshold", "Day/Night Threshold"),
@@ -796,10 +812,6 @@ class App(ttk.Frame):
             ("antiFlicker", "Anti-Flicker"),
             ("backLight", "Backlight"),
             ("whiteBalance", "White Balance"),
-            ("blc", "BLC"),
-            ("drc", "DRC"),
-            ("redGain", "Red Gain"),
-            ("blueGain", "Blue Gain"),
             ("mirroring", "Mirroring"),
             ("rotation", "Rotation"),
             ("nr3d", "3D Noise Reduction"),
@@ -812,21 +824,49 @@ class App(ttk.Frame):
                         f"{label}: requested {requested.get(key)!r}, verified {verified.get(key)!r}"
                     )
 
-        req_gain = requested.get("gain", {}) or {}
-        ver_gain = verified.get("gain", {}) or {}
-        for key, label in [("min", "Gain Min"), ("max", "Gain Max")]:
-            if req_gain.get(key) != ver_gain.get(key):
+        # Backlight-dependent numeric controls
+        if requested_backlight == "BackLightControl":
+            if requested.get("blc") != verified.get("blc"):
                 mismatches.append(
-                    f"{label}: requested {req_gain.get(key)!r}, verified {ver_gain.get(key)!r}"
+                    f"BLC: requested {requested.get('blc')!r}, verified {verified.get('blc')!r}"
                 )
 
+        if requested_backlight == "DynamicRangeControl":
+            if requested.get("drc") != verified.get("drc"):
+                mismatches.append(
+                    f"DRC: requested {requested.get('drc')!r}, verified {verified.get('drc')!r}"
+                )
+
+        # White balance manual gains
+        if requested_white_balance == "Manual":
+            if requested.get("redGain") != verified.get("redGain"):
+                mismatches.append(
+                    f"Red Gain: requested {requested.get('redGain')!r}, verified {verified.get('redGain')!r}"
+                )
+            if requested.get("blueGain") != verified.get("blueGain"):
+                mismatches.append(
+                    f"Blue Gain: requested {requested.get('blueGain')!r}, verified {verified.get('blueGain')!r}"
+                )
+
+        # Exposure-dependent gain controls
+        req_gain = requested.get("gain", {}) or {}
+        ver_gain = verified.get("gain", {}) or {}
+        if requested_exposure == "Manual":
+            for key, label in [("min", "Gain Min"), ("max", "Gain Max")]:
+                if req_gain.get(key) != ver_gain.get(key):
+                    mismatches.append(
+                        f"{label}: requested {req_gain.get(key)!r}, verified {ver_gain.get(key)!r}"
+                    )
+
+        # Exposure-dependent shutter controls
         req_shutter = requested.get("shutter", {}) or {}
         ver_shutter = verified.get("shutter", {}) or {}
-        for key, label in [("min", "Shutter Min"), ("max", "Shutter Max")]:
-            if req_shutter.get(key) != ver_shutter.get(key):
-                mismatches.append(
-                    f"{label}: requested {req_shutter.get(key)!r}, verified {ver_shutter.get(key)!r}"
-                )
+        if requested_exposure in {"Manual", "Anti-Smearing"}:
+            for key, label in [("min", "Shutter Min"), ("max", "Shutter Max")]:
+                if req_shutter.get(key) != ver_shutter.get(key):
+                    mismatches.append(
+                        f"{label}: requested {req_shutter.get(key)!r}, verified {ver_shutter.get(key)!r}"
+                    )
 
         for block_key, block_name in [
             ("bd_day", "Day"),
@@ -856,6 +896,35 @@ class App(ttk.Frame):
                     )
 
         return mismatches
+
+    def _refresh_dependency_states(self) -> None:
+        backlight = self.backlight_var.get().strip()
+        exposure = self.exposure_var.get().strip()
+        white_balance = self.white_balance_var.get().strip()
+
+        blc_state = "normal" if backlight == "BackLightControl" else "disabled"
+        drc_state = "normal" if backlight == "DynamicRangeControl" else "disabled"
+
+        gain_state = "normal" if exposure == "Manual" else "disabled"
+        shutter_state = "normal" if exposure in {"Manual", "Anti-Smearing"} else "disabled"
+
+        wb_gain_state = "normal" if white_balance == "Manual" else "disabled"
+
+        # BLC / DRC
+        self.blc_entry.configure(state=blc_state)
+        self.drc_entry.configure(state=drc_state)
+
+        # Gain
+        self.gain_min_entry.configure(state=gain_state)
+        self.gain_max_entry.configure(state=gain_state)
+
+        # Shutter
+        self.shutter_min_entry.configure(state=shutter_state)
+        self.shutter_max_entry.configure(state=shutter_state)
+
+        # White balance manual gains
+        self.red_gain_entry.configure(state=wb_gain_state)
+        self.blue_gain_entry.configure(state=wb_gain_state)
 
     # Show the given dict as formatted JSON in the display-only panel.
     # This always reflects the last read/loaded snapshot, not unsaved form edits.
@@ -939,6 +1008,7 @@ class App(ttk.Frame):
         self.rotation_var.set(bool(isp.get("rotation", 0)))
         self.nr3d_var.set(bool(isp.get("nr3d", 1)))
 
+        self._refresh_dependency_states()
         self.log_json(isp)
 
     # Build a complete ISP payload from the current UI field values,
@@ -1052,7 +1122,8 @@ class App(ttk.Frame):
         messagebox.showerror(APP_TITLE, error_message)
         self.set_status(f"Read failed: {error_message}")
 
-    def _on_write_success(self, requested: dict, verified: dict) -> None:
+    def _on_write_success(self, requested: dict, verified: dict, set_resp: dict) -> None:
+        self.last_set_isp_response = deepcopy(set_resp)
         self.last_read_isp = deepcopy(verified)
         self.camera_isp = deepcopy(verified)
 
@@ -1066,13 +1137,14 @@ class App(ttk.Frame):
             shown = "\n- ".join(mismatches[:12])
             if len(mismatches) > 12:
                 shown += "\n- ..."
+
             self.set_status("Write completed with verification warnings.")
             messagebox.showwarning(
                 APP_TITLE,
                 "The camera accepted the write, but some settings did not stick after read-back verification:\n\n"
-                f"- {shown}",
+                f"- {shown}\n\n"
+                f"Raw SetIsp response: {set_resp}",
             )
-            self.set_status("Write completed with verification warnings.")
         else:
             self.set_status("Wrote ISP successfully and verified camera settings.")
             messagebox.showinfo(APP_TITLE, "Settings written and verified successfully.")
@@ -1108,9 +1180,9 @@ class App(ttk.Frame):
         def background_task():
             try:
                 client = self._client()
-                client.set_isp(isp)
+                set_resp = client.set_isp(isp)
                 verified = client.get_isp()
-                self.master.after(0, self._on_write_success, isp, verified)
+                self.master.after(0, self._on_write_success, isp, verified, set_resp)
             except Exception as e:
                 self.master.after(0, self._on_write_error, str(e))
 
