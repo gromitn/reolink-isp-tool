@@ -786,6 +786,77 @@ class App(ttk.Frame):
         walk(backup_isp, self.camera_isp)
         return missing
 
+    def _compare_requested_vs_verified(self, requested: dict, verified: dict) -> list[str]:
+        mismatches: list[str] = []
+
+        checks = [
+            ("dayNight", "Day/Night"),
+            ("dayNightThreshold", "Day/Night Threshold"),
+            ("exposure", "Exposure"),
+            ("antiFlicker", "Anti-Flicker"),
+            ("backLight", "Backlight"),
+            ("whiteBalance", "White Balance"),
+            ("blc", "BLC"),
+            ("drc", "DRC"),
+            ("redGain", "Red Gain"),
+            ("blueGain", "Blue Gain"),
+            ("mirroring", "Mirroring"),
+            ("rotation", "Rotation"),
+            ("nr3d", "3D Noise Reduction"),
+        ]
+
+        for key, label in checks:
+            if key in requested or key in verified:
+                if requested.get(key) != verified.get(key):
+                    mismatches.append(
+                        f"{label}: requested {requested.get(key)!r}, verified {verified.get(key)!r}"
+                    )
+
+        req_gain = requested.get("gain", {}) or {}
+        ver_gain = verified.get("gain", {}) or {}
+        for key, label in [("min", "Gain Min"), ("max", "Gain Max")]:
+            if req_gain.get(key) != ver_gain.get(key):
+                mismatches.append(
+                    f"{label}: requested {req_gain.get(key)!r}, verified {ver_gain.get(key)!r}"
+                )
+
+        req_shutter = requested.get("shutter", {}) or {}
+        ver_shutter = verified.get("shutter", {}) or {}
+        for key, label in [("min", "Shutter Min"), ("max", "Shutter Max")]:
+            if req_shutter.get(key) != ver_shutter.get(key):
+                mismatches.append(
+                    f"{label}: requested {req_shutter.get(key)!r}, verified {ver_shutter.get(key)!r}"
+                )
+
+        for block_key, block_name in [
+            ("bd_day", "Day"),
+            ("bd_night", "Night"),
+            ("bd_led_color", "LED Color"),
+        ]:
+            req_block = requested.get(block_key, {}) or {}
+            ver_block = verified.get(block_key, {}) or {}
+            if not req_block and not ver_block:
+                continue
+
+            for key, label in [("mode", "Mode"), ("bright", "Bright"), ("dark", "Dark")]:
+                if req_block.get(key) != ver_block.get(key):
+                    mismatches.append(
+                        f"{block_name} {label}: requested {req_block.get(key)!r}, verified {ver_block.get(key)!r}"
+                    )
+
+        for key, label in [
+            ("hdr", "HDR"),
+            ("constantFrameRate", "Constant Frame Rate"),
+            ("encType", "Encoding Type"),
+        ]:
+            if key in requested or key in verified:
+                if requested.get(key) != verified.get(key):
+                    mismatches.append(
+                        f"{label}: requested {requested.get(key)!r}, verified {verified.get(key)!r}"
+                    )
+
+        return mismatches
+
     # Show the given dict as formatted JSON in the display-only panel.
     # This always reflects the last read/loaded snapshot, not unsaved form edits.
     def log_json(self, data: dict) -> None:
@@ -807,7 +878,7 @@ class App(ttk.Frame):
             bg, fg = "#ffebee", "#b71c1c"   # soft red
         elif "copied" in lower or "saved backup" in lower or "loaded backup" in lower or "reloaded" in lower:
             bg, fg = "#e3f2fd", "#0d47a1"   # soft blue
-        elif "cancelled" in lower:
+        elif "cancelled" in lower or "warning" in lower or "did not stick" in lower:
             bg, fg = "#fff8e1", "#8d6e63"   # soft amber
         else:
             bg, fg = "#e8f5e9", "#1b5e20"   # soft green
@@ -981,15 +1052,30 @@ class App(ttk.Frame):
         messagebox.showerror(APP_TITLE, error_message)
         self.set_status(f"Read failed: {error_message}")
 
-    def _on_write_success(self, verified: dict) -> None:
+    def _on_write_success(self, requested: dict, verified: dict) -> None:
         self.last_read_isp = deepcopy(verified)
         self.camera_isp = deepcopy(verified)
 
         self.populate_from_isp(verified)
         self.read_btn.configure(state="normal")
         self.write_btn.configure(state="normal")
-        self.set_status("Wrote ISP successfully and verified camera settings.")
-        messagebox.showinfo(APP_TITLE, "Settings written and verified successfully.")
+
+        mismatches = self._compare_requested_vs_verified(requested, verified)
+
+        if mismatches:
+            shown = "\n- ".join(mismatches[:12])
+            if len(mismatches) > 12:
+                shown += "\n- ..."
+            self.set_status("Write completed with verification warnings.")
+            messagebox.showwarning(
+                APP_TITLE,
+                "The camera accepted the write, but some settings did not stick after read-back verification:\n\n"
+                f"- {shown}",
+            )
+            self.set_status("Write completed with verification warnings.")
+        else:
+            self.set_status("Wrote ISP successfully and verified camera settings.")
+            messagebox.showinfo(APP_TITLE, "Settings written and verified successfully.")
 
     def _on_write_error(self, error_message: str) -> None:
         self.read_btn.configure(state="normal")
@@ -1024,7 +1110,7 @@ class App(ttk.Frame):
                 client = self._client()
                 client.set_isp(isp)
                 verified = client.get_isp()
-                self.master.after(0, self._on_write_success, verified)
+                self.master.after(0, self._on_write_success, isp, verified)
             except Exception as e:
                 self.master.after(0, self._on_write_error, str(e))
 
