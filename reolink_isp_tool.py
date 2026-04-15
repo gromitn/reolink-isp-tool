@@ -14,9 +14,9 @@ It uses only the Python standard library:
 Typical usage:
 1. Enter protocol, IP, username, and password.
 2. Click "Read ISP".
-3. Adjust values.
-4. Click "Write ISP".
-5. Optionally save/load JSON backups.
+3. Adjust values and click "Write ISP" for manual changes.
+4. Save backups with "Backup JSON".
+5. Use "Restore Backup..." to restore a same-model backup directly to the camera.
 
 Packaging to EXE (on Windows):
     py -m pip install pyinstaller
@@ -44,7 +44,7 @@ from tkinter import ttk, messagebox, filedialog
 from datetime import datetime
 
 APP_TITLE = "Reolink ISP Tool"
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.0.3"
 DEFAULT_SAVE_FILE = "reolink_isp_backup.json"
 
 
@@ -253,6 +253,7 @@ class App(ttk.Frame):
         # Metadata from the most recently loaded backup file, if any.
         self.loaded_backup_dev_info: dict | None = None
         self.loaded_backup_path: str | None = None
+        self.loaded_backup_isp: dict | None = None
         self.last_set_isp_response: dict | None = None
 
         self.protocol_var = tk.StringVar(value="http")
@@ -395,7 +396,7 @@ class App(ttk.Frame):
         ttk.Button(backup_actions, text="Backup JSON", command=self.save_backup).grid(
             row=0, column=0, sticky="ew", padx=(0, 4)
         )
-        ttk.Button(backup_actions, text="Load JSON", command=self.load_backup).grid(
+        ttk.Button(backup_actions, text="Restore Backup...", command=self.restore_backup).grid(
             row=0, column=1, sticky="ew", padx=(4, 0)
         )
 
@@ -435,7 +436,7 @@ class App(ttk.Frame):
         status.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         status.columnconfigure(0, weight=1)
 
-        self.status_var = tk.StringVar(value="Ready. Click Read ISP or Load JSON to begin.")
+        self.status_var = tk.StringVar(value="Ready. Click Read ISP or Restore Backup to begin.")
         self.status_label = tk.Label(
             status,
             textvariable=self.status_var,
@@ -658,7 +659,7 @@ class App(ttk.Frame):
         yscroll.grid(row=0, column=1, sticky="ns")
         self.raw_text.configure(yscrollcommand=yscroll.set)
 
-        self.raw_text.insert("1.0", "No ISP data loaded yet.\n\nClick Read ISP or Load JSON to begin.")
+        self.raw_text.insert("1.0", "No ISP data loaded yet.\n\nClick Read ISP or Restore Backup to begin.")
         self.raw_text.configure(state="disabled")
 
         ttk.Button(raw, text="Copy JSON", command=self.copy_raw_json).grid(
@@ -798,6 +799,11 @@ class App(ttk.Frame):
         walk(backup_isp, self.camera_isp)
         return missing
 
+    # Compare requested vs. verified ISP values after a write/restore.
+    #
+    # This comparison is dependency-aware: it ignores fields that are inactive
+    # by design in the chosen mode (for example BLC when backlight is Off, or
+    # Red/Blue Gain when white balance is Auto).
     def _compare_requested_vs_verified(self, requested: dict, verified: dict) -> list[str]:
         mismatches: list[str] = []
 
@@ -897,6 +903,9 @@ class App(ttk.Frame):
 
         return mismatches
 
+    # Enable or disable UI fields based on mode dependencies discovered through
+    # real camera testing. Disabled fields may still exist in the camera config,
+    # but are not expected to apply in the current controlling mode.
     def _refresh_dependency_states(self) -> None:
         backlight = self.backlight_var.get().strip()
         exposure = self.exposure_var.get().strip()
@@ -1011,15 +1020,32 @@ class App(ttk.Frame):
         self._refresh_dependency_states()
         self.log_json(isp)
 
-    # Build a complete ISP payload from the current UI field values,
-    # validating numeric entries as needed.
+    # Build an ISP payload from the current UI field values for manual writes.
+    # This is used by "Write ISP" only.
+    #
+    # Backups are restored through a separate staged restore path because some
+    # camera settings only apply when their controlling mode is temporarily enabled
+    # (for example BLC/DRC, gain/shutter, and manual white balance gains).
     def build_isp_from_fields(self) -> dict:
         if self.current_isp is None:
-            raise ReolinkApiError("Read ISP first, or load a backup JSON first.")
+            raise ReolinkApiError("Read ISP first, or restore a backup first.")
 
-        # Prefer the last live camera snapshot as the write base so unsupported
-        # keys from another model are not blindly introduced by a loaded backup.
-        base_isp = self.camera_isp if self.camera_isp is not None else self.current_isp
+        # Decide what to use as the write base:
+        # - same-model loaded backup: use the loaded backup itself as the base
+        # - otherwise: prefer the last live camera snapshot for safety
+        same_model_loaded_backup = (
+            self.loaded_backup_isp is not None
+            and self.loaded_backup_dev_info is not None
+            and self.camera_dev_info is not None
+            and str(self.loaded_backup_dev_info.get("model", "")).strip()
+            == str(self.camera_dev_info.get("model", "")).strip()
+        )
+
+        if same_model_loaded_backup:
+            base_isp = self.loaded_backup_isp
+        else:
+            base_isp = self.camera_isp if self.camera_isp is not None else self.current_isp
+
         isp = deepcopy(base_isp)
 
         def intv(var: tk.StringVar, name: str) -> int:
@@ -1028,12 +1054,18 @@ class App(ttk.Frame):
             except ValueError as e:
                 raise ReolinkApiError(f"{name} must be an integer") from e
 
+        backlight = self.backlight_var.get().strip()
+        exposure = self.exposure_var.get().strip()
+        white_balance = self.white_balance_var.get().strip()
+
+        # Always-written core settings
         isp["dayNight"] = self.daynight_var.get().strip()
         isp["dayNightThreshold"] = intv(self.daynight_threshold_var, "Day/Night Threshold")
-        isp["exposure"] = self.exposure_var.get().strip()
+        isp["exposure"] = exposure
         isp["antiFlicker"] = self.antiflicker_var.get().strip()
-        isp["backLight"] = self.backlight_var.get().strip()
-        isp["whiteBalance"] = self.white_balance_var.get().strip()
+        isp["backLight"] = backlight
+        isp["whiteBalance"] = white_balance
+
         if "hdr" in isp:
             isp["hdr"] = 1 if self.hdr_var.get() else 0
 
@@ -1043,20 +1075,28 @@ class App(ttk.Frame):
         if "encType" in isp and self.enc_type_var.get().strip():
             isp["encType"] = self.enc_type_var.get().strip()
 
+        # Only write dependent fields when their controlling mode is active.
+        if backlight == "BackLightControl":
+            isp["blc"] = intv(self.blc_var, "BLC")
 
-        isp.setdefault("gain", {})
-        isp["gain"]["min"] = intv(self.gain_min_var, "Gain Min")
-        isp["gain"]["max"] = intv(self.gain_max_var, "Gain Max")
+        if backlight == "DynamicRangeControl":
+            isp["drc"] = intv(self.drc_var, "DRC")
 
-        isp.setdefault("shutter", {})
-        isp["shutter"]["min"] = intv(self.shutter_min_var, "Shutter Min")
-        isp["shutter"]["max"] = intv(self.shutter_max_var, "Shutter Max")
+        if white_balance == "Manual":
+            isp["redGain"] = intv(self.red_gain_var, "Red Gain")
+            isp["blueGain"] = intv(self.blue_gain_var, "Blue Gain")
 
-        isp["blc"] = intv(self.blc_var, "BLC")
-        isp["drc"] = intv(self.drc_var, "DRC")
-        isp["redGain"] = intv(self.red_gain_var, "Red Gain")
-        isp["blueGain"] = intv(self.blue_gain_var, "Blue Gain")
+        if exposure == "Manual":
+            isp.setdefault("gain", {})
+            isp["gain"]["min"] = intv(self.gain_min_var, "Gain Min")
+            isp["gain"]["max"] = intv(self.gain_max_var, "Gain Max")
 
+        if exposure in {"Manual", "Anti-Smearing"}:
+            isp.setdefault("shutter", {})
+            isp["shutter"]["min"] = intv(self.shutter_min_var, "Shutter Min")
+            isp["shutter"]["max"] = intv(self.shutter_max_var, "Shutter Max")
+
+        # These blocks appear to store correctly regardless of mode setting.
         isp.setdefault("bd_day", {})
         isp["bd_day"]["mode"] = self.bd_day_mode_var.get().strip()
         isp["bd_day"]["bright"] = intv(self.bd_day_bright_var, "Day Bright")
@@ -1066,6 +1106,7 @@ class App(ttk.Frame):
         isp["bd_night"]["mode"] = self.bd_night_mode_var.get().strip()
         isp["bd_night"]["bright"] = intv(self.bd_night_bright_var, "Night Bright")
         isp["bd_night"]["dark"] = intv(self.bd_night_dark_var, "Night Dark")
+
         if "bd_led_color" in isp:
             isp.setdefault("bd_led_color", {})
             isp["bd_led_color"]["mode"] = self.bd_led_color_mode_var.get().strip()
@@ -1107,6 +1148,7 @@ class App(ttk.Frame):
 
         self.loaded_backup_dev_info = None
         self.loaded_backup_path = None
+        self.loaded_backup_isp = None
 
         self.populate_from_isp(isp)
         self.read_btn.configure(state="normal")
@@ -1156,6 +1198,63 @@ class App(ttk.Frame):
         messagebox.showerror(APP_TITLE, error_message)
         self.set_status(f"Write failed: {error_message}")
 
+    def _apply_write_workarounds(self, client: ReolinkClient, isp: dict) -> None:
+        exposure = str(isp.get("exposure", "")).strip()
+
+        shutter = isp.get("shutter", {}) or {}
+        shutter_min = shutter.get("min")
+        shutter_max = shutter.get("max")
+
+        gain = isp.get("gain", {}) or {}
+        gain_min = gain.get("min")
+        gain_max = gain.get("max")
+
+        # Firmware quirk workaround:
+        # In Manual / Anti-Smearing, changing directly from one locked shutter
+        # value to another locked shutter value does not always re-evaluate.
+        # Opening the range first, then re-locking it, appears to make the
+        # camera apply the new shutter properly.
+        if (
+            exposure in {"Manual", "Anti-Smearing"}
+            and isinstance(shutter_min, int)
+            and isinstance(shutter_max, int)
+            and shutter_min == shutter_max
+        ):
+            stage = deepcopy(isp)
+            stage.setdefault("shutter", {})
+
+            if shutter_max <= 1:
+                stage["shutter"]["min"] = 0
+                stage["shutter"]["max"] = 1
+            else:
+                stage["shutter"]["min"] = 1
+                stage["shutter"]["max"] = shutter_max
+
+            client.set_isp(stage)
+
+        # Firmware quirk workaround:
+        # In Manual exposure, changing directly from one locked gain value to
+        # another locked gain value does not always re-evaluate.
+        # Opening the gain range first, then re-locking it, appears to make the
+        # camera apply the new gain properly.
+        if (
+            exposure == "Manual"
+            and isinstance(gain_min, int)
+            and isinstance(gain_max, int)
+            and gain_min == gain_max
+        ):
+            stage = deepcopy(isp)
+            stage.setdefault("gain", {})
+
+            if gain_max <= 1:
+                stage["gain"]["min"] = 1
+                stage["gain"]["max"] = 62
+            else:
+                stage["gain"]["min"] = 1
+                stage["gain"]["max"] = gain_max
+
+            client.set_isp(stage)
+
     # Write the current UI field values to the camera in a background thread,
     # then read back to verify and update the UI with the actual saved state.
     def write_isp(self) -> None:
@@ -1180,6 +1279,7 @@ class App(ttk.Frame):
         def background_task():
             try:
                 client = self._client()
+                self._apply_write_workarounds(client, isp)
                 set_resp = client.set_isp(isp)
                 verified = client.get_isp()
                 self.master.after(0, self._on_write_success, isp, verified, set_resp)
@@ -1187,6 +1287,173 @@ class App(ttk.Frame):
                 self.master.after(0, self._on_write_error, str(e))
 
         threading.Thread(target=background_task, daemon=True).start()
+
+    def _read_backup_file(self, path: str) -> tuple[dict, dict | None]:
+        try:
+            payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        except Exception as e:
+            raise ReolinkApiError(f"Could not load JSON: {e}") from e
+
+        if isinstance(payload, dict) and "isp" in payload:
+            isp = payload.get("isp")
+            dev_info = payload.get("dev_info")
+            if not isinstance(isp, dict):
+                raise ReolinkApiError("Backup file contains an invalid 'isp' block")
+            if dev_info is not None and not isinstance(dev_info, dict):
+                raise ReolinkApiError("Backup file contains an invalid 'dev_info' block")
+            return isp, dev_info
+
+        if isinstance(payload, dict):
+            # Backward compatibility: old backups were plain ISP dicts.
+            return payload, None
+
+        raise ReolinkApiError("JSON root must be an object")
+
+    # Restore a backup file directly to the connected camera.
+    #
+    # This path is intentionally separate from the manual form-edit workflow:
+    # - it requires the connected camera to have been live-read first
+    # - it only allows exact same-model restores
+    # - it restores from the backup file directly, not from the current form
+    # - it performs staged writes so mode-dependent settings can be applied
+    #   before the backup's final target modes are restored
+    def restore_backup(self) -> None:
+        if self.camera_dev_info is None or self.camera_isp is None:
+            messagebox.showwarning(APP_TITLE, "Read ISP from the camera first before restoring a backup.")
+            return
+
+        path = filedialog.askopenfilename(
+            title="Restore backup to camera",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+
+        try:
+            backup_isp, backup_dev_info = self._read_backup_file(path)
+        except Exception as e:
+            messagebox.showerror(APP_TITLE, str(e))
+            return
+
+        backup_model = ""
+        if backup_dev_info and backup_dev_info.get("model"):
+            backup_model = str(backup_dev_info.get("model", "")).strip()
+
+        camera_model = ""
+        if self.camera_dev_info and self.camera_dev_info.get("model"):
+            camera_model = str(self.camera_dev_info.get("model", "")).strip()
+
+        if not backup_model:
+            messagebox.showerror(
+                APP_TITLE,
+                "This backup does not contain camera model metadata, so it cannot be restored safely.\n\n"
+                "Use a backup created by a newer version of this tool.",
+            )
+            return
+
+        if not camera_model:
+            messagebox.showerror(APP_TITLE, "Could not determine the connected camera model. Read ISP again first.")
+            return
+
+        if backup_model != camera_model:
+            messagebox.showerror(
+                APP_TITLE,
+                f"This backup is from {backup_model}, but the connected camera is {camera_model}.\n\n"
+                "Restore Backup only supports the exact same model.",
+            )
+            return
+
+        if not messagebox.askyesno(
+            APP_TITLE,
+            f"Restore this backup to the connected {camera_model} camera?\n\n"
+            "This will overwrite the camera's current ISP settings.",
+        ):
+            self.set_status("Restore backup cancelled.")
+            return
+
+        self.loaded_backup_dev_info = deepcopy(backup_dev_info) if backup_dev_info else None
+        self.loaded_backup_path = path
+        self.loaded_backup_isp = deepcopy(backup_isp)
+        self._refresh_backup_info_label()
+
+        self.read_btn.configure(state="disabled")
+        self.write_btn.configure(state="disabled")
+        self.set_status("Restoring backup to camera... please wait.")
+
+        def background_task():
+            try:
+                client = self._client()
+
+                def make_stage(**overrides) -> dict:
+                    stage = deepcopy(backup_isp)
+                    for key, value in overrides.items():
+                        stage[key] = value
+                    return stage
+
+                # Some Reolink ISP values only stick when their controlling mode
+                # is temporarily active. Restore those in intermediate stages first,
+                # then do a final pass using the backup's actual target modes.
+                stages: list[dict] = []
+
+                # Restore dependent values under modes that actually honor them.
+                if "redGain" in backup_isp or "blueGain" in backup_isp:
+                    stages.append(make_stage(whiteBalance="Manual"))
+
+                if "gain" in backup_isp or "shutter" in backup_isp:
+                    stages.append(make_stage(exposure="Manual"))
+
+                if "blc" in backup_isp:
+                    stages.append(make_stage(backLight="BackLightControl"))
+
+                if "drc" in backup_isp:
+                    stages.append(make_stage(backLight="DynamicRangeControl"))
+
+                # Final pass restores the backup's actual target modes and values.
+                stages.append(deepcopy(backup_isp))
+
+                for stage in stages:
+                    client.set_isp(stage)
+
+                verified = client.get_isp()
+                self.master.after(0, self._on_restore_success, backup_isp, verified)
+            except Exception as e:
+                self.master.after(0, self._on_restore_error, str(e))
+
+        threading.Thread(target=background_task, daemon=True).start()
+
+    def _on_restore_success(self, requested: dict, verified: dict) -> None:
+        self.last_read_isp = deepcopy(verified)
+        self.camera_isp = deepcopy(verified)
+
+        self.populate_from_isp(verified)
+        self.read_btn.configure(state="normal")
+        self.write_btn.configure(state="normal")
+        self._refresh_camera_info_label()
+        self._refresh_backup_info_label()
+
+        mismatches = self._compare_requested_vs_verified(requested, verified)
+
+        if mismatches:
+            shown = "\n- ".join(mismatches[:12])
+            if len(mismatches) > 12:
+                shown += "\n- ..."
+            self.set_status("Restore completed with verification warnings.")
+            messagebox.showwarning(
+                APP_TITLE,
+                "The backup restore completed, but some final values did not match after read-back verification:\n\n"
+                f"- {shown}",
+            )
+        else:
+            self.set_status("Backup restored and verified successfully.")
+            messagebox.showinfo(APP_TITLE, "Backup restored and verified successfully.")
+
+    def _on_restore_error(self, error_message: str) -> None:
+        self.read_btn.configure(state="normal")
+        if self.current_isp is not None:
+            self.write_btn.configure(state="normal")
+        messagebox.showerror(APP_TITLE, error_message)
+        self.set_status(f"Restore failed: {error_message}")
+
 
     def save_backup(self) -> None:
         try:
@@ -1219,6 +1486,9 @@ class App(ttk.Frame):
         Path(path).write_text(json.dumps(backup, indent=2), encoding="utf-8")
         self.set_status(f"Saved backup: {path}")
 
+    # Legacy backup-to-form loader kept temporarily for reference.
+    # The supported backup workflow is now Restore Backup..., which restores
+    # directly to the connected same-model camera using staged writes.
     def load_backup(self) -> None:
         path = filedialog.askopenfilename(
             title="Load ISP backup",
@@ -1291,6 +1561,7 @@ class App(ttk.Frame):
 
         self.loaded_backup_dev_info = deepcopy(dev_info) if dev_info else None
         self.loaded_backup_path = path
+        self.loaded_backup_isp = deepcopy(isp)
         self._refresh_backup_info_label()
         self.last_read_isp = deepcopy(isp)
 
