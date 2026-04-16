@@ -42,9 +42,13 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 from datetime import datetime
+import webbrowser
 
 APP_TITLE = "Reolink ISP Tool"
-APP_VERSION = "1.0.3"
+APP_VERSION = "1.0.4"
+GITHUB_OWNER = "gromitn"
+GITHUB_REPO = "reolink-isp-tool"
+GITHUB_LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
 DEFAULT_SAVE_FILE = "reolink_isp_backup.json"
 
 
@@ -398,6 +402,9 @@ class App(ttk.Frame):
         )
         ttk.Button(backup_actions, text="Restore Backup...", command=self.restore_backup).grid(
             row=0, column=1, sticky="ew", padx=(4, 0)
+        )
+        ttk.Button(backup_actions, text="Check for Updates", command=self.check_for_updates).grid(
+            row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0)
         )
 
         backup_info_row = ttk.Frame(backup_actions)
@@ -1454,6 +1461,76 @@ class App(ttk.Frame):
         messagebox.showerror(APP_TITLE, error_message)
         self.set_status(f"Restore failed: {error_message}")
 
+    def _parse_version_tag(self, tag: str) -> tuple[int, ...]:
+        text = str(tag).strip().lower()
+        if text.startswith("v"):
+            text = text[1:]
+
+        parts: list[int] = []
+        for piece in text.split("."):
+            try:
+                parts.append(int(piece))
+            except ValueError:
+                break
+        return tuple(parts)
+
+    def _on_update_check_result(self, latest_tag: str, release_url: str) -> None:
+        current_version = self._parse_version_tag(APP_VERSION)
+        latest_version = self._parse_version_tag(latest_tag)
+
+        if latest_version > current_version:
+            self.set_status(f"Update available: {latest_tag}")
+            open_page = messagebox.askyesno(
+                APP_TITLE,
+                f"A newer version is available.\n\n"
+                f"Current version: v{APP_VERSION}\n"
+                f"Latest version: {latest_tag}\n\n"
+                f"Open the release page now?",
+            )
+            if open_page:
+                webbrowser.open(release_url)
+        else:
+            self.set_status("You already have the latest version.")
+            messagebox.showinfo(
+                APP_TITLE,
+                f"You already have the latest version.\n\n"
+                f"Current version: v{APP_VERSION}\n"
+                f"Latest version: {latest_tag}",
+            )
+
+    def _on_update_check_error(self, error_message: str) -> None:
+        self.set_status(f"Update check failed: {error_message}")
+        messagebox.showerror(APP_TITLE, f"Could not check for updates:\n\n{error_message}")
+
+    def check_for_updates(self) -> None:
+        self.set_status("Checking for updates...")
+
+        def background_task():
+            try:
+                req = urllib.request.Request(
+                    GITHUB_LATEST_RELEASE_API,
+                    headers={
+                        "Accept": "application/vnd.github+json",
+                        "X-GitHub-Api-Version": "2026-03-10",
+                    },
+                    method="GET",
+                )
+
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    raw = resp.read().decode("utf-8", errors="replace")
+
+                payload = json.loads(raw)
+                latest_tag = str(payload.get("tag_name", "")).strip()
+                release_url = str(payload.get("html_url", "")).strip()
+
+                if not latest_tag or not release_url:
+                    raise ReolinkApiError("GitHub response did not include release version info.")
+
+                self.master.after(0, self._on_update_check_result, latest_tag, release_url)
+            except Exception as e:
+                self.master.after(0, self._on_update_check_error, str(e))
+
+        threading.Thread(target=background_task, daemon=True).start()
 
     def save_backup(self) -> None:
         try:
