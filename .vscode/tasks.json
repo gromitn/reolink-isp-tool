@@ -1,0 +1,31 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build EXE",
+      "type": "shell",
+      "command": "Remove-Item -Recurse -Force .\\build -ErrorAction SilentlyContinue; py -m PyInstaller --clean --noconfirm --onefile --windowed --name 'Reolink ISP Tool' reolink_isp_tool.py",
+      "options": {
+        "shell": {
+          "executable": "powershell.exe",
+          "args": [
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command"
+          ]
+        }
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "clear": true
+      },
+      "problemMatcher": []
+    }
+  ]
+}
