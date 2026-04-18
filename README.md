@@ -8,7 +8,7 @@ Some newer Reolink firmware versions no longer expose certain advanced image / I
 
 This tool was created to make those settings easier to access again in a simple Windows GUI, while still keeping the workflow cautious with backups, verification, and model-aware warnings.
 
-## Companion integration
+## Companion Home Assistant integration
 
 There’s also a companion Home Assistant integration: [Reolink ISP Controls](https://github.com/gromitn/reolink-isp-controls).
 
