@@ -8,6 +8,12 @@ Some newer Reolink firmware versions no longer expose certain advanced image / I
 
 This tool was created to make those settings easier to access again in a simple Windows GUI, while still keeping the workflow cautious with backups, verification, and model-aware warnings.
 
+## Companion integration
+
+There’s also a companion Home Assistant integration: [Reolink ISP Controls](https://github.com/gromitn/reolink-isp-controls).
+
+That project exposes a lean set of Reolink ISP controls inside Home Assistant, including Exposure, Gain Min/Max, Shutter Min/Max, and an atomic `reolink_isp.apply_settings` action for applying several settings in one hit. It’s designed to sit alongside the official Reolink integration, not replace it.
+
 ## What it does
 
 - Reads ISP settings directly from a Reolink camera over your LAN
