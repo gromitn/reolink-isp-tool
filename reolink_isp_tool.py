@@ -45,7 +45,7 @@ from datetime import datetime
 import webbrowser
 
 APP_TITLE = "Reolink ISP Tool"
-APP_VERSION = "1.0.4"
+APP_VERSION = "1.0.5"
 GITHUB_OWNER = "gromitn"
 GITHUB_REPO = "reolink-isp-tool"
 GITHUB_LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
@@ -306,6 +306,9 @@ class App(ttk.Frame):
         self.backlight_var.trace_add("write", lambda *_: self._refresh_dependency_states())
         self.exposure_var.trace_add("write", lambda *_: self._refresh_dependency_states())
         self.white_balance_var.trace_add("write", lambda *_: self._refresh_dependency_states())
+        self.bd_day_mode_var.trace_add("write", lambda *_: self._refresh_dependency_states())
+        self.bd_night_mode_var.trace_add("write", lambda *_: self._refresh_dependency_states())
+        self.bd_led_color_mode_var.trace_add("write", lambda *_: self._refresh_dependency_states())
         self._refresh_dependency_states()
 
         self._configure_grid()
@@ -551,8 +554,8 @@ class App(ttk.Frame):
             0,
             tooltip="Controls the bright/dark balance for the colour/day image. Auto lets the camera tune it itself. Manual lets you push the picture brighter or darker if daytime contrast is not quite right.",
         )
-        self._entry(bd_day, "Bright", self.bd_day_bright_var, 0, 1)
-        self._entry(bd_day, "Dark", self.bd_day_dark_var, 0, 2)
+        self.bd_day_bright_entry = self._entry(bd_day, "Bright", self.bd_day_bright_var, 0, 1)
+        self.bd_day_dark_entry = self._entry(bd_day, "Dark", self.bd_day_dark_var, 0, 2)
 
         bd_night = ttk.LabelFrame(parent, text="Brightness & Shadows — Night", padding=10)
         bd_night.grid(row=4, column=0, sticky="ew", pady=(10, 0))
@@ -567,8 +570,8 @@ class App(ttk.Frame):
             0,
             tooltip="Controls the bright/dark balance for the night / black-and-white image. Useful if the night image feels too flat, too crushed, or too washed out.",
         )
-        self._entry(bd_night, "Bright", self.bd_night_bright_var, 0, 1)
-        self._entry(bd_night, "Dark", self.bd_night_dark_var, 0, 2)
+        self.bd_night_bright_entry = self._entry(bd_night, "Bright", self.bd_night_bright_var, 0, 1)
+        self.bd_night_dark_entry = self._entry(bd_night, "Dark", self.bd_night_dark_var, 0, 2)
 
         self.bd_led_color = ttk.LabelFrame(parent, text="Brightness & Shadows — LED Color", padding=10)
         self.bd_led_color.grid(row=5, column=0, sticky="ew", pady=(10, 0))
@@ -583,8 +586,8 @@ class App(ttk.Frame):
             0,
             tooltip="Controls the bright/dark balance for colour night mode when the spotlight / colour night lighting is active.",
         )
-        self._entry(self.bd_led_color, "Bright", self.bd_led_color_bright_var, 0, 1)
-        self._entry(self.bd_led_color, "Dark", self.bd_led_color_dark_var, 0, 2)
+        self.bd_led_color_bright_entry = self._entry(self.bd_led_color, "Bright", self.bd_led_color_bright_var, 0, 1)
+        self.bd_led_color_dark_entry = self._entry(self.bd_led_color, "Dark", self.bd_led_color_dark_var, 0, 2)
 
         # Hidden until the current camera/backup actually exposes bd_led_color.
         self.bd_led_color.grid_remove()
@@ -891,11 +894,19 @@ class App(ttk.Frame):
             if not req_block and not ver_block:
                 continue
 
-            for key, label in [("mode", "Mode"), ("bright", "Bright"), ("dark", "Dark")]:
-                if req_block.get(key) != ver_block.get(key):
-                    mismatches.append(
-                        f"{block_name} {label}: requested {req_block.get(key)!r}, verified {ver_block.get(key)!r}"
-                    )
+            # Always verify the mode itself.
+            if req_block.get("mode") != ver_block.get("mode"):
+                mismatches.append(
+                    f"{block_name} Mode: requested {req_block.get('mode')!r}, verified {ver_block.get('mode')!r}"
+                )
+
+            # Only verify Bright/Dark when the block is in Manual mode.
+            if str(req_block.get("mode", "")).strip() == "Manual":
+                for key, label in [("bright", "Bright"), ("dark", "Dark")]:
+                    if req_block.get(key) != ver_block.get(key):
+                        mismatches.append(
+                            f"{block_name} {label}: requested {req_block.get(key)!r}, verified {ver_block.get(key)!r}"
+                        )
 
         for key, label in [
             ("hdr", "HDR"),
@@ -918,6 +929,10 @@ class App(ttk.Frame):
         exposure = self.exposure_var.get().strip()
         white_balance = self.white_balance_var.get().strip()
 
+        bd_day_mode = self.bd_day_mode_var.get().strip()
+        bd_night_mode = self.bd_night_mode_var.get().strip()
+        bd_led_color_mode = self.bd_led_color_mode_var.get().strip()
+
         blc_state = "normal" if backlight == "BackLightControl" else "disabled"
         drc_state = "normal" if backlight == "DynamicRangeControl" else "disabled"
 
@@ -925,6 +940,10 @@ class App(ttk.Frame):
         shutter_state = "normal" if exposure in {"Manual", "Anti-Smearing"} else "disabled"
 
         wb_gain_state = "normal" if white_balance == "Manual" else "disabled"
+
+        bd_day_state = "normal" if bd_day_mode == "Manual" else "disabled"
+        bd_night_state = "normal" if bd_night_mode == "Manual" else "disabled"
+        bd_led_color_state = "normal" if bd_led_color_mode == "Manual" else "disabled"
 
         # BLC / DRC
         self.blc_entry.configure(state=blc_state)
@@ -941,6 +960,16 @@ class App(ttk.Frame):
         # White balance manual gains
         self.red_gain_entry.configure(state=wb_gain_state)
         self.blue_gain_entry.configure(state=wb_gain_state)
+
+        # Brightness & Shadows manual controls
+        self.bd_day_bright_entry.configure(state=bd_day_state)
+        self.bd_day_dark_entry.configure(state=bd_day_state)
+
+        self.bd_night_bright_entry.configure(state=bd_night_state)
+        self.bd_night_dark_entry.configure(state=bd_night_state)
+
+        self.bd_led_color_bright_entry.configure(state=bd_led_color_state)
+        self.bd_led_color_dark_entry.configure(state=bd_led_color_state)
 
     # Show the given dict as formatted JSON in the display-only panel.
     # This always reflects the last read/loaded snapshot, not unsaved form edits.
@@ -1087,22 +1116,24 @@ class App(ttk.Frame):
             isp["shutter"]["min"] = intv(self.shutter_min_var, "Shutter Min")
             isp["shutter"]["max"] = intv(self.shutter_max_var, "Shutter Max")
 
-        # These blocks appear to store correctly regardless of mode setting.
         isp.setdefault("bd_day", {})
         isp["bd_day"]["mode"] = self.bd_day_mode_var.get().strip()
-        isp["bd_day"]["bright"] = intv(self.bd_day_bright_var, "Day Bright")
-        isp["bd_day"]["dark"] = intv(self.bd_day_dark_var, "Day Dark")
+        if isp["bd_day"]["mode"] == "Manual":
+            isp["bd_day"]["bright"] = intv(self.bd_day_bright_var, "Day Bright")
+            isp["bd_day"]["dark"] = intv(self.bd_day_dark_var, "Day Dark")
 
         isp.setdefault("bd_night", {})
         isp["bd_night"]["mode"] = self.bd_night_mode_var.get().strip()
-        isp["bd_night"]["bright"] = intv(self.bd_night_bright_var, "Night Bright")
-        isp["bd_night"]["dark"] = intv(self.bd_night_dark_var, "Night Dark")
+        if isp["bd_night"]["mode"] == "Manual":
+            isp["bd_night"]["bright"] = intv(self.bd_night_bright_var, "Night Bright")
+            isp["bd_night"]["dark"] = intv(self.bd_night_dark_var, "Night Dark")
 
         if "bd_led_color" in isp:
             isp.setdefault("bd_led_color", {})
             isp["bd_led_color"]["mode"] = self.bd_led_color_mode_var.get().strip()
-            isp["bd_led_color"]["bright"] = intv(self.bd_led_color_bright_var, "LED Color Bright")
-            isp["bd_led_color"]["dark"] = intv(self.bd_led_color_dark_var, "LED Color Dark")
+            if isp["bd_led_color"]["mode"] == "Manual":
+                isp["bd_led_color"]["bright"] = intv(self.bd_led_color_bright_var, "LED Color Bright")
+                isp["bd_led_color"]["dark"] = intv(self.bd_led_color_dark_var, "LED Color Dark")
 
         isp["mirroring"] = 1 if self.mirroring_var.get() else 0
         isp["rotation"] = 1 if self.rotation_var.get() else 0
@@ -1277,18 +1308,6 @@ class App(ttk.Frame):
                 set_resp = client.set_isp(isp)
                 verified = client.get_isp()
 
-                self.master.after(0, self._on_write_success, isp, verified, set_resp)
-            except Exception as e:
-                self.master.after(0, self._on_write_error, str(e))
-
-        threading.Thread(target=background_task, daemon=True).start()
-
-        def background_task():
-            try:
-                client = self._client()
-                self._apply_write_workarounds(client, isp)
-                set_resp = client.set_isp(isp)
-                verified = client.get_isp()
                 self.master.after(0, self._on_write_success, isp, verified, set_resp)
             except Exception as e:
                 self.master.after(0, self._on_write_error, str(e))
