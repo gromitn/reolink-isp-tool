@@ -1030,28 +1030,12 @@ class App(ttk.Frame):
     # Build an ISP payload from the current UI field values for manual writes.
     # This is used by "Write ISP" only.
     #
-    # Backups are restored through a separate staged restore path because some
-    # camera settings only apply when their controlling mode is temporarily enabled
-    # (for example BLC/DRC, gain/shutter, and manual white balance gains).
-    def build_isp_from_fields(self) -> dict:
-        if self.current_isp is None:
-            raise ReolinkApiError("Read ISP first, or restore a backup first.")
-
-        # Decide what to use as the write base:
-        # - same-model loaded backup: use the loaded backup itself as the base
-        # - otherwise: prefer the last live camera snapshot for safety
-        same_model_loaded_backup = (
-            self.loaded_backup_isp is not None
-            and self.loaded_backup_dev_info is not None
-            and self.camera_dev_info is not None
-            and str(self.loaded_backup_dev_info.get("model", "")).strip()
-            == str(self.camera_dev_info.get("model", "")).strip()
-        )
-
-        if same_model_loaded_backup:
-            base_isp = self.loaded_backup_isp
-        else:
-            base_isp = self.camera_isp if self.camera_isp is not None else self.current_isp
+    # For manual writes, we now expect a fresh live ISP snapshot to be passed in
+    # as the base so the outgoing payload behaves more like the original
+    # PowerShell workflow: GetIsp -> modify relevant fields -> SetIsp.
+    def build_isp_from_fields(self, base_isp: dict) -> dict:
+        if not isinstance(base_isp, dict):
+            raise ReolinkApiError("A live ISP snapshot is required before writing.")
 
         isp = deepcopy(base_isp)
 
@@ -1263,7 +1247,8 @@ class App(ttk.Frame):
             client.set_isp(stage)
 
     # Write the current UI field values to the camera in a background thread,
-    # then read back to verify and update the UI with the actual saved state.
+    # starting from a fresh live GetIsp snapshot each time so manual writes
+    # mirror the original PowerShell workflow as closely as possible.
     def write_isp(self) -> None:
         if not messagebox.askyesno(
             APP_TITLE,
@@ -1272,16 +1257,31 @@ class App(ttk.Frame):
             self.set_status("Write cancelled.")
             return
 
-        try:
-            isp = self.build_isp_from_fields()
-        except Exception as e:
-            messagebox.showerror(APP_TITLE, str(e))
-            self.set_status(f"Write failed: {e}")
-            return
-
         self.read_btn.configure(state="disabled")
         self.write_btn.configure(state="disabled")
         self.set_status("Writing ISP settings to camera... please wait.")
+
+        def background_task():
+            try:
+                client = self._client()
+
+                # Fresh live base every time, like the original PowerShell flow.
+                live_isp = client.get_isp()
+
+                # Build the outgoing payload from the current form values on top
+                # of the live ISP snapshot we just fetched.
+                isp = self.build_isp_from_fields(live_isp)
+
+                # Apply firmware-specific staged workarounds, then do the final write.
+                self._apply_write_workarounds(client, isp)
+                set_resp = client.set_isp(isp)
+                verified = client.get_isp()
+
+                self.master.after(0, self._on_write_success, isp, verified, set_resp)
+            except Exception as e:
+                self.master.after(0, self._on_write_error, str(e))
+
+        threading.Thread(target=background_task, daemon=True).start()
 
         def background_task():
             try:
@@ -1534,7 +1534,7 @@ class App(ttk.Frame):
 
     def save_backup(self) -> None:
         try:
-            isp = self.build_isp_from_fields() if self.current_isp else None
+            isp = deepcopy(self.current_isp) if self.current_isp else None
         except Exception as e:
             messagebox.showerror(APP_TITLE, str(e))
             return
